@@ -79,13 +79,9 @@ function consumeFromAbly() {
       ch.consume(queue, (item) => {
         const decodedEnvelope = JSON.parse(item.content);
 
-        /* Use the Ably library to decode the message.
-           The envelope messages attribute will only contain one message. However, in future versions,
-           we may allow optional bundling of messages into a single queue message and as such this
-           attribute is an Array to support that in future
-        */
         let currentChannel = decodedEnvelope.channel;
         let messages = decodedEnvelope.presence;
+
         messages.forEach(function(message) {
           let action = message.action;
           let clientId = message.clientId;
@@ -93,8 +89,10 @@ function consumeFromAbly() {
               message.timestamp <= currentState[currentChannel][clientId].timestamp) {
                 /* Old message, don't do anything with it */
           } else if (action == 3) {
+            /* 3 is the leave event, so remove them from the channel */
             delete currentState[currentChannel][clientId];
           } else if (action == 2) {
+            /* 2 is the enter event, so add them from the channel */
             currentState[currentChannel][clientId] = message;
           }
         });
