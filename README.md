@@ -48,7 +48,7 @@ Replace the Ably API key, queue name (what you called the queue above) and names
 
 ## Server Output
 
-The server once running will subscribe 'presence-command' channel, in addition to checking the last message published into it. If the last message or next message published had a name of @update@ and a data field of @start@, the server will start collecting presence details.
+The server once running will subscribe 'presence-command' channel, in addition to checking the last message published into it. If the last message or next message published had a name of *update* and a data field of *start*, the server will start collecting presence details.
 
 Once started, it will establish the current presence state of the channels which match your NAMESPACE_REGEX regex, and store it locally. Currently the structure of the data is:
 
