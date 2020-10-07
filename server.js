@@ -8,14 +8,25 @@ let amqpConnection;
 
 /* AMQP */
 const apiKey = process.env.ABLY_API_KEY;
-const queueName = "presence-queue";
+let queueName;
+if (process.env.QUEUE_NAME == undefined) {
+  queueName = 'presence-queue';
+} else {
+  queueName = process.env.QUEUE_NAME;
+}
 const queueEndpoint = "us-east-1-a-queue.ably.io:5671/shared";
 
 
 /* Ably details */
 const rest = new Ably.Rest({ key: apiKey });
 const realtime = new Ably.Realtime({ key: apiKey });
-const channelNamespace = /^presence:.*/;
+
+let channelNamespace;
+if (process.env.NAMESPACE_REGEX === undefined) {
+  channelNamespace = /^presence:.*/;
+} else {
+  channelNamespace = new RegExp(process.env.NAMESPACE_REGEX);
+}
 const publishChannel = rest.channels.get('presence-updates');
 const channelOptions = {
   params: {
