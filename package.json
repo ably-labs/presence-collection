@@ -1,0 +1,14 @@
+{
+  "name": "presence-collection",
+  "version": "1.0.0",
+  "description": "Aggregate Ably presence into single messages",
+  "author": "Tom Camp <tom.camp@ably.com>",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ably": "^1.2.3",
+    "amqplib": "^0.6.0"
+  }
+}
