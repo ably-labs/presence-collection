@@ -32,7 +32,7 @@ This will build a docker image.
 
 If you're building from docker hub, run the following:
 
-`docker pull tomably/presence-collection:1.0.0`
+`docker pull tomably/presence-collection:1.1.0`
 
 This will pull the image from docker hub to your local device.
 
@@ -40,31 +40,58 @@ This will pull the image from docker hub to your local device.
 
 You can now run the app with the following:
 
-`docker run --env ABLY_API_KEY="YOUR_API_KEY" --env QUEUE_NAME="presence-queue" --env NAMESPACE_REGEX="^presence:.*"  tomably/presence-collection:1.0.0
-`
+`docker run --env ABLY_API_KEY="YOUR_API_KEY" --env QUEUE_NAME="presence-queue" --env NAMESPACE_REGEX="^presence:.*"  tomably/presence-collection:1.1.0`
 
 Replace the Ably API key, queue name (what you called the queue above) and namespace regex to match your needs. In addition, change the image name if you're using a differently named one.
 
-
 ## Server Output
 
-The server once running will subscribe to the 'presence-command' channel, in addition to checking the last message published into it. If the last message or next message published had a name of *update* and a data field of *start*, the server will start collecting presence details.
+The server once running will subscribe to the 'presencebatch:commands' channel, in addition to checking the last message published into it. If the last message or next message published had a name of *update* and a data field of *start*, the server will start collecting presence details.
 
-Once started, it will establish the current presence state of the channels which match your NAMESPACE_REGEX regex, and store it locally. Currently the structure of the data is:
+Once started, it will establish the current presence state of the channels which match your NAMESPACE_REGEX regex, and store it locally. Currently there are three representations of this data published, to their own relative channels:
+
+#### Channel-centric updates are published to `presencebatch:by-channel`, in the following structure:
 
 ```
 {
   "channel1" {
-    "client1": { // client 1 details },
-    "client2": { // client 2 details }
+    "client1": { "connectionId1": { /* connection 1 in channel's details */ } },
+    "client2": { "connectionId2": { /* connection 2 details */ },  "connectionId3": { /* connection 3 details */ } },
   },
   "channel2" {
-    "client1": { // client 1 details },
-    "client3": { // client 3 details }
+    "client1": { "connectionId2": { /* connection 2 details */ } }
+  }
+}
+```
+
+#### Client ID-centric updates are published to `presencebatch:by-clientId`, in the following structure:
+
+```
+{
+  "clientId1" {
+    "channel1": { "connectionId1": { /* connection 1 in channel's details */ } },
+    "channel2": { "connectionId2": { /* connection 2 details */ },  "connectionId3": { /* connection 3 details */ } },
+  },
+  "clientId2" {
+    "channel1": { "connectionId4": { /* connection 3 details */ } }
+  }
+}
+```
+
+#### Connection ID-centric updates are published to `presencebatch:by-connectionId`, in the following structure:
+
+```
+{
+  "connectionId1" {
+    "clientId1": { "channel1": { /* connection 1 in channel 1's details */ } },
+    "clientId2": { "channel1": { /* connection 1 in channel 1's details */ },  "channel2": { /* connection 1 in channel 2's details */ } },
+  },
+  "connectionId2" {
+    "clientId1": { "channel1": { /* connection 2 in channel 1's details */ } }
   }
 }
 ```
 
 Once the initial state is established, the app will consume from the Reactor Queue we set up earlier, and update the local state with any enter or leave events.
 
-Every 3 seconds, the app will then publish this state to the Ably channel `presence-update`. Seeing as this object can often be fairly large, with little variation between each publish, it's recommended to subscribe to this channel from clients with [deltas enabled](https://www.ably.io/documentation/realtime/channels/channel-parameters/deltas).
+Every 3 seconds, the app will then publish this state to the aforementioned channels. Seeing as this object can often be fairly large, with little variation between each publish, it's recommended to subscribe to this channel from clients with [deltas enabled](https://www.ably.io/documentation/realtime/channels/channel-parameters/deltas).
