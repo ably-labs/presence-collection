@@ -53,6 +53,7 @@ function stopUpdates() {
   if (amqpConnection != undefined) {
     amqpConnection.close();
   }
+  clearInterval(updatingLoop);
 }
 
 function updateAbly() {
