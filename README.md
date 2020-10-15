@@ -59,8 +59,8 @@ Once started, it will establish the current presence state of the channels which
     "client2": { // client 2 details }
   },
   "channel2" {
-     "client1": { // client 1 details },
-     "client3": { // client 3 details },
+    "client1": { // client 1 details },
+    "client3": { // client 3 details }
   }
 }
 ```
