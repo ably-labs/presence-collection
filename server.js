@@ -46,6 +46,12 @@ commandChannel.subscribe(function(message) {
 });
 
 function startUpdates() {
+  if (amqpConnection != undefined) {
+    amqpConnection.close();
+  }
+  if (updatingLoop != null) {
+    clearInterval(updatingLoop);
+  }
   initializeState();
 }
 
