@@ -88,7 +88,7 @@ function consumeFromAbly() {
       consumeFromQueue(queueChannel);
     });
 
-    conn.on('error', function(err) { console.error('worker:', 'Connection error!', err); });
+    conn.on('error', (err) => { console.error('worker:', 'Connection error!', err); });
   });
 };
 
@@ -103,7 +103,7 @@ function consumeFromQueue(queueChannel) {
 
     let messages = Ably.Realtime.PresenceMessage.fromEncodedArray(decodedEnvelope.presence);
 
-    messages.forEach(function(message) {
+    messages.forEach((message) => {
       let clientId = message.clientId;
       let connectionId = message.connectionId;
 
@@ -128,7 +128,7 @@ function getInitialPresenceState() {
     {direction: 'forwards'},
     null,
     null,
-    function(err, response) {
+    (err, response) => {
       if(err) {
         console.log('An error occurred; err = ' + err.toString());
       } else {
@@ -155,7 +155,7 @@ function getPresenceSets(response) {
 
   let content = { "channel": channelsToCheck }
   /* Make a batch request to all relevant channels for their presence sets */
-  rest.request('GET', '/presence', content, null, {}, function(err, presenceSet) {
+  rest.request('GET', '/presence', content, null, {}, (err, presenceSet) => {
     if(err) {
       console.log('An error occurred; err = ' + err.toString());
     } else {
@@ -164,7 +164,7 @@ function getPresenceSets(response) {
   });
 
   if(response.hasNext()) {
-    response.next(function(err, nextPage) {
+    response.next((err, nextPage) => {
       getPresenceSets(response);
     });
   } else {
