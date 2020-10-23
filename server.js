@@ -1,11 +1,10 @@
 const amqp = require('amqplib/callback_api');
 const Ably = require('ably');
-const ServerPort = 3000;
 
 let currentStateByChannel = {};
 let currentStateByClientId = {};
 let currentStateByConnectionId = {};
-let updatingLoop;
+let shouldSendUpdate = false;
 let amqpConnection;
 
 /* AMQP */
@@ -27,9 +26,9 @@ if (process.env.NAMESPACE_REGEX === undefined) {
 } else {
   channelNamespace = new RegExp(process.env.NAMESPACE_REGEX);
 }
-const publishByChannelChannel = rest.channels.get('presencebatch:by-channel');
-const publishByClientIdChannel = rest.channels.get('presencebatch:by-clientId');
-const publishByConnectionIdChannel = rest.channels.get('presencebatch:by-connectionId');
+const channelForPublishingByChannel = rest.channels.get('presencebatch:by-channel');
+const channelForPublishingByClientId = rest.channels.get('presencebatch:by-clientId');
+const channelForPublishingByConnection = rest.channels.get('presencebatch:by-connectionId');
 
 const channelOptions = {
   params: {
@@ -37,40 +36,41 @@ const channelOptions = {
   }
 };
 const commandChannel = realtime.channels.get('presencebatch:commands', channelOptions);
-commandChannel.subscribe(function(message) {
-  if (message.name == 'update' && message.data == 'start') {
-    startUpdates();
-  } else if (message.name == 'update' && message.data == 'stop') {
-    stopUpdates();
+commandChannel.subscribe('update', (message) => {
+  if (message.data == 'start') {
+    startPresenceUpdates();
+  } else if (message.data == 'stop') {
+    stopPresenceUpdates();
   }
 });
 
-function startUpdates() {
+function startPresenceUpdates() {
   if (amqpConnection != undefined) {
     amqpConnection.close();
   }
-  if (updatingLoop != null) {
-    clearInterval(updatingLoop);
-  }
-  initializeState();
+  shouldSendUpdate = false;
+  getInitialPresenceState();
 }
 
-function stopUpdates() {
+function stopPresenceUpdates() {
   if (amqpConnection != undefined) {
     amqpConnection.close();
   }
-  clearInterval(updatingLoop);
+  shouldSendUpdate = false;
 }
 
-function updateAbly() {
-  publishByChannelChannel.publish('presence-update', currentStateByChannel);
-  publishByClientIdChannel.publish('presence-update', currentStateByClientId);
-  publishByConnectionIdChannel.publish('presence-update', currentStateByConnectionId);
+function sendPresenceSetsToAbly() {
+  if (shouldSendUpdate) {
+    setTimeout(() => {
+      channelForPublishingByChannel.publish('presence-update', currentStateByChannel);
+      channelForPublishingByClientId.publish('presence-update', currentStateByClientId);
+      channelForPublishingByConnection.publish('presence-update', currentStateByConnectionId);
+      sendPresenceSetsToAbly();
+    }, 3000);
+  }
 }
 
 function consumeFromAbly() {
-  const appId = apiKey.split('.')[0];
-  const queue = appId + ":" + queueName;
   const endpoint = queueEndpoint;
   const url = 'amqps://' + apiKey + '@' + endpoint;
 
@@ -81,68 +81,46 @@ function consumeFromAbly() {
     }
     amqpConnection = conn;
     /* Create a communication channel */
-    conn.createChannel((err, ch) => {
+    conn.createChannel((err, queueChannel) => {
       if (err) {
         return console.error('worker:', 'Queue error!', err);
       }
-
-      /* Wait for messages published to the Ably Reactor queue */
-      ch.consume(queue, (item) => {
-        const decodedEnvelope = JSON.parse(item.content);
-
-        let currentChannel = decodedEnvelope.channel;
-        let messages = decodedEnvelope.presence;
-
-        messages.forEach(function(message) {
-          let clientId = message.clientId;
-          let connectionId = message.connectionId;
-
-          /* Update presence by channel object */
-          updateObject(currentStateByChannel, currentChannel, clientId, connectionId, message);
-          /* Update presence by clientID object */
-          updateObject(currentStateByClientId, clientId, currentChannel, connectionId, message);
-          /* Update presence by connectionId object */
-          updateObject(currentStateByConnectionId, connectionId, clientId, currentChannel, message);
-        });
-
-        /* Remove message from queue */
-        ch.ack(item);
-      });
+      consumeFromQueue(queueChannel);
     });
 
     conn.on('error', function(err) { console.error('worker:', 'Connection error!', err); });
   });
 };
 
-function updateObject(obj, param1, param2, param3, message) {
-  let action = message.action;
+function consumeFromQueue(queueChannel) {
+  const appId = apiKey.split('.')[0];
+  const queue = appId + ":" + queueName;
 
-  if (obj[param1] == undefined) {
-    obj[param1] = {};
-  }
-  if (obj[param1][param2] == undefined) {
-    obj[param1][param2] = {};
-  }
+  queueChannel.consume(queue, (item) => {
+    const decodedEnvelope = JSON.parse(item.content);
 
-  if (obj[param1][param2][param3] != undefined &&
-      message.timestamp <= obj[param1][param2][param3].timestamp) {
-    /* Old message, don't do anything with it */
-  } else if (action == 3) {
-    /* 3 is the leave event, so remove them from the channel */
-    delete obj[param1][param2][param3];
-    if (Object.keys(obj[param1][param2]).length === 0) {
-      delete obj[param1][param2];
-    }
-    if (Object.keys(obj[param1]).length === 0) {
-      delete obj[param1];
-    }
-  } else if (action == 2) {
-    /* 2 is the enter event, so add them to the channel */
-    obj[param1][param2][param3] = message;
-  }
+    let currentChannel = decodedEnvelope.channel;
+
+    let messages = Ably.Realtime.PresenceMessage.fromEncodedArray(decodedEnvelope.presence);
+
+    messages.forEach(function(message) {
+      let clientId = message.clientId;
+      let connectionId = message.connectionId;
+
+      /* Update presence by channel object */
+      updatePresenceObject(currentStateByChannel, currentChannel, clientId, connectionId, message);
+      /* Update presence by clientID object */
+      updatePresenceObject(currentStateByClientId, clientId, currentChannel, connectionId, message);
+      /* Update presence by connectionId object */
+      updatePresenceObject(currentStateByConnectionId, connectionId, clientId, currentChannel, message);
+    });
+
+    /* Remove message from queue */
+    queueChannel.ack(item);
+  });
 }
 
-function initializeState() {
+function getInitialPresenceState() {
   /* Make a request for all currently active channels */
   rest.request(
     'get',
@@ -163,9 +141,9 @@ function initializeState() {
 function getPresenceSets(response) {
   let channelsToCheck = "";
   let firstElementAdded = false;
-  for (let i = 0; i < response.items.length; i++) {
-    let channelId = response.items[i].channelId;
-    if (response.items[i].status.isActive && channelId.match(channelNamespace)) {
+  for (let channelObject of response.items) {
+    let channelId = channelObject.channelId;
+    if (channelObject.status.isActive && channelId.match(channelNamespace)) {
       if (!firstElementAdded) {
         firstElementAdded = true;
         channelsToCheck = channelId;
@@ -175,7 +153,7 @@ function getPresenceSets(response) {
     }
   }
 
-  var content = { "channel": channelsToCheck }
+  let content = { "channel": channelsToCheck }
   /* Make a batch request to all relevant channels for their presence sets */
   rest.request('GET', '/presence', content, null, {}, function(err, presenceSet) {
     if(err) {
@@ -191,36 +169,62 @@ function getPresenceSets(response) {
     });
   } else {
     consumeFromAbly();
-    updatingLoop = setInterval(updateAbly, 3000);
+
+    shouldSendUpdate = true;
+    sendPresenceSetsToAbly();
   }
 }
 
 function updateCurrentState(presenceSet) {
-  for (let i = 0; i < presenceSet.length; i++) {
-    currentStateByChannel[presenceSet[i].channel] = {};
+  for (let channelPresenceSet of presenceSet) {
+    let channelName = channelPresenceSet.channel;
+    currentStateByChannel[channelName] = {};
 
-    for (let j = 0; j < presenceSet[i].presence.length; j++) {
-      let message = presenceSet[i].presence[j];
-      let clientId = presenceSet[i].presence[j].clientId;
-      let connectionId = presenceSet[i].presence[j].connectionId;
-      let channel = presenceSet[i].channel;
+    for (let presenceMessage of channelPresenceSet.presence) {
+      let clientId = presenceMessage.clientId;
+      let connectionId = presenceMessage.connectionId;
 
       /* Add the presence message to the object sorted by channel */
-      createObjectField(currentStateByChannel, channel, clientId, connectionId, message);
+      createObjectField(currentStateByChannel, channelName, clientId, connectionId, presenceMessage);
       /* Add the presence message to the object sorted by clientId */
-      createObjectField(currentStateByClientId, clientId, channel, connectionId, message);
+      createObjectField(currentStateByClientId, clientId, channelName, connectionId, presenceMessage);
       /* Add the presence message to the object sorted by connectionId */
-      createObjectField(currentStateByConnectionId, connectionId, clientId, channel, message);
+      createObjectField(currentStateByConnectionId, connectionId, clientId, channelName, presenceMessage);
     }
   }
+}
 
-  function createObjectField(obj, param1, param2, param3, message) {
-      if (obj[param1] === undefined) {
-        obj[param1] = {};
-      }
-      if (obj[param1][param2] === undefined) {
-        obj[param1][param2] = {};
-      }
-      obj[param1][param2][param3] = message;
+function createObjectField(obj, param1, param2, param3, message) {
+  if (obj[param1] === undefined) {
+    obj[param1] = {};
+  }
+  if (obj[param1][param2] === undefined) {
+    obj[param1][param2] = {};
+  }
+  obj[param1][param2][param3] = message;
+}
+
+function updatePresenceObject(obj, param1, param2, param3, message) {
+  let action = message.action;
+
+  if (obj[param1] == undefined) {
+    obj[param1] = {};
+  }
+  if (obj[param1][param2] == undefined) {
+    obj[param1][param2] = {};
+  }
+
+  if (obj[param1][param2][param3] != undefined &&
+      message.timestamp <= obj[param1][param2][param3].timestamp) {
+  } else if (action === 'leave') {
+    delete obj[param1][param2][param3];
+    if (Object.keys(obj[param1][param2]).length === 0) {
+      delete obj[param1][param2];
+    }
+    if (Object.keys(obj[param1]).length === 0) {
+      delete obj[param1];
+    }
+  } else if (action == 'enter') {
+    obj[param1][param2][param3] = message;
   }
 }
