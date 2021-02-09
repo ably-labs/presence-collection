@@ -41,6 +41,10 @@ This will pull the image from docker hub to your local device.
 You can now run the app with the following:
 
 `docker run --env ABLY_API_KEY="YOUR_API_KEY" --env QUEUE_NAME="presence-queue" --env NAMESPACE_REGEX="^presence:.*"  tomably/presence-collection:1.1.0`
+or 
+`docker run --env ABLY_API_KEY="YOUR_API_KEY" --env QUEUE_NAME="presence-queue" --env NAMESPACE_REGEX="^presence:.*" --env CONSUME_ON_START="true"  tomably/presence-collection:1.1.0`
+
+if you want to start it by default. If CONSUME_ON_START is not specified, you will need to send "start" command to channel named: "presencebatch:commands" in order to server to start processsing.
 
 Replace the Ably API key, queue name (what you called the queue above) and namespace regex to match your needs. In addition, change the image name if you're using a differently named one.
 

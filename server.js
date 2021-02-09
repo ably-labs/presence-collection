@@ -7,6 +7,10 @@ let currentStateByConnectionId = {};
 let shouldSendUpdate = false;
 let amqpConnection;
 
+
+/* Consume on start */
+let consumeOnStart = process.env.CONSUME_ON_START != undefined;
+
 /* AMQP */
 const apiKey = process.env.ABLY_API_KEY;
 let queueName;
@@ -43,6 +47,10 @@ commandChannel.subscribe('update', (message) => {
     stopPresenceUpdates();
   }
 });
+
+if(consumeOnStart){
+  startPresenceUpdates();
+}
 
 function startPresenceUpdates() {
   if (amqpConnection != undefined) {
