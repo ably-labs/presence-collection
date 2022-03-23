@@ -8,7 +8,10 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "ably": "^1.2.3",
-    "amqplib": "^0.6.0"
+    "@types/amqplib": "^0.8.2",
+    "ably": "^1.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^17.0.22"
   }
 }
