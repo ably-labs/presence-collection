@@ -1,8 +1,7 @@
-import * as Amqp from 'amqplib/callback_api';
+import * as Amqp from 'amqplib';
 import * as Ably from 'ably';
-import internal = require('stream');
-import { Channel } from 'diagnostics_channel';
 
+// Interfaces
 interface Metrics {
   connections: number;
   publishers: number;
@@ -16,227 +15,9 @@ interface Occupancy {
   metrics: Metrics;
 }
 
-interface ChannelStatus {
-  isActive: boolean;
-  occupancy: Occupancy | null;
-}
-
-interface ChannelDetails {
-  channelId: string;
-  status: ChannelStatus;
-}
-
-let currentStateByChannel: object = {};
-let currentStateByClientId: object = {};
-let currentStateByConnectionId: object = {};
-let shouldSendUpdate = false;
-let amqpConnection: Amqp.Connection;
-
-// Consume on start
-let consumeOnStart = process.env.CONSUME_ON_START != undefined;
-
-// AMQP
-const apiKey = process.env.ABLY_API_KEY;
-if (!apiKey) {
-  throw new Error('no Ably API key set');
-}
-let queueName: string;
-if (process.env.QUEUE_NAME == undefined) {
-  queueName = 'presence-queue';
-} else {
-  queueName = process.env.QUEUE_NAME;
-}
-const queueEndpoint = "us-east-1-a-queue.ably.io:5671/shared";
-
-// Ably details
-const rest = new Ably.Rest({ key: apiKey });
-const realtime = new Ably.Realtime({ key: apiKey });
-let channelNamespace: RegExp;
-if (process.env.NAMESPACE_REGEX === undefined) {
-  channelNamespace = /^presence:.*/;
-} else {
-  channelNamespace = new RegExp(process.env.NAMESPACE_REGEX);
-}
-const channelForPublishingByChannel = rest.channels.get('presencebatch:by-channel');
-const channelForPublishingByClientId = rest.channels.get('presencebatch:by-clientId');
-const channelForPublishingByConnection = rest.channels.get('presencebatch:by-connectionId');
-
-const channelOptions: Ably.Types.ChannelOptions = {
-  params: {
-    'rewind': '1'
-  },
-  cipher: undefined,
-  modes: [],
-};
-const commandChannel = realtime.channels.get('presencebatch:commands', channelOptions);
-commandChannel.subscribe('update', (message) => {
-  if (message.data == 'start') {
-    startPresenceUpdates();
-  } else if (message.data == 'stop') {
-    stopPresenceUpdates();
-  }
-});
-
-if(consumeOnStart){
-  startPresenceUpdates();
-}
-
-function startPresenceUpdates(): void {
-  if (amqpConnection != undefined) {
-    amqpConnection.close();
-  }
-  shouldSendUpdate = false;
-  getInitialPresenceState();
-}
-
-function stopPresenceUpdates(): void {
-  if (amqpConnection != undefined) {
-    amqpConnection.close();
-  }
-  shouldSendUpdate = false;
-}
-
-function sendPresenceSetsToAbly(): void {
-  if (shouldSendUpdate) {
-    setTimeout(() => {
-      /*
-      channelForPublishingByChannel.publish('presence-update', currentStateByChannel);
-      channelForPublishingByClientId.publish('presence-update', currentStateByClientId);
-      channelForPublishingByConnection.publish('presence-update', currentStateByConnectionId);
-      */
-      sendPresenceSetsToAbly();
-    }, 3000);
-  }
-}
-
-function consumeFromAbly() {
-  const endpoint = queueEndpoint;
-  const url = 'amqps://' + apiKey + '@' + endpoint;
-
-  // Connect to Ably queue
-  Amqp.connect(url, (err, conn) => {
-    if (err) {
-      return console.error('worker:', 'Queue error!', err);
-    }
-    amqpConnection = conn;
-    // Create a communication channel
-    conn.createChannel((err, queueChannel) => {
-      if (err) {
-        return console.error('worker:', 'Queue error!', err);
-      }
-      consumeFromQueue(queueChannel);
-    });
-
-    conn.on('error', (err) => { console.error('worker:', 'Connection error!', err); });
-  });
-};
-
-function consumeFromQueue(queueChannel: Amqp.Channel): void {
-  const appId = apiKey?.split('.')[0];
-  const queue = appId + ":" + queueName;
-
-  queueChannel.consume(queue, (item) => {
-    if (!item) {
-      console.warn('queueChannel.consume returned a null item');
-      return;
-    }
-    const decodedEnvelope = JSON.parse(item.content.toString());
-
-    let currentChannel = decodedEnvelope.channel;
-
-    let messages = Ably.Realtime.PresenceMessage.fromEncodedArray(decodedEnvelope.presence);
-
-    messages.forEach((message) => {
-      let clientId = message.clientId;
-      let connectionId = message.connectionId;
-
-      presenceUpdate(currentChannel, message);
-
-      /*
-      // Update presence by channel object
-      updatePresenceObject(currentStateByChannel, currentChannel, clientId, connectionId, message);
-      // Update presence by clientID object
-      updatePresenceObject(currentStateByClientId, clientId, currentChannel, connectionId, message);
-      // Update presence by connectionId object
-      updatePresenceObject(currentStateByConnectionId, connectionId, clientId, currentChannel, message);
-      */
-    });
-
-    // Remove message from queue
-    queueChannel.ack(item);
-  });
-}
-
-function getInitialPresenceState(): void {
-  // Make a request for all currently active channels
-  rest.request(
-    'get',
-    '/channels',
-    {direction: 'forwards'},
-    null,
-    null,
-    (err, response) => {
-      if(err) {
-        console.log('An error occurred; err = ' + err.toString());
-      } else {
-        getPresenceSets(response);
-      }
-    }
-  );
-}
-
-function subscribeToOccupancyEvents(channelId:string) {
-  const channelOptions: Ably.Types.ChannelOptions = {
-    params: {
-      'occupancy': 'metrics'
-    },
-    cipher: undefined,
-    modes: [],
-  };
-  const channel = realtime.channels.get(channelId, channelOptions);
-  channel.subscribe('[meta]occupancy', (message) => {
-    let typedMessage: Metrics = Object.assign(<Metrics>{}, message.data);
-    console.log('metrics for '+channelId+': ', JSON.stringify(typedMessage));
-  });
-}
-
-function getPresenceSets(response: Ably.Types.HttpPaginatedResponse): void {
-  let channelsToCheck = "";
-  let firstElementAdded = false;
-  for (let channelObject of response.items) {
-    let channelDetails = Object.assign(<ChannelDetails>{}, channelObject);
-    let channelId = channelDetails.channelId;
-    if (channelDetails.status.isActive && channelId.match(channelNamespace)) {
-      if (!firstElementAdded) {
-        firstElementAdded = true;
-        channelsToCheck = channelId;
-      } else {
-        channelsToCheck += "," + channelId;
-      }
-      subscribeToOccupancyEvents(channelId);
-    }
-  }
-
-  let content = { "channel": channelsToCheck }
-  // Make a batch request to all relevant channels for their presence sets
-  rest.request('GET', '/presence', content, null, {}, (err, presenceSet) => {
-    if(err) {
-      console.log('An error occurred; err = ' + err.toString());
-    } else {
-      updateCurrentState(presenceSet.items);
-    }
-  });
-
-  if(response.hasNext()) {
-    response.next((err, nextPage) => {
-      getPresenceSets(response);
-    });
-  } else {
-    consumeFromAbly();
-
-    shouldSendUpdate = true;
-    sendPresenceSetsToAbly();
-  }
+interface OccupancyUpdate {
+  channel: string;
+  occupancy: Occupancy[];
 }
 
 interface PresenceSet {
@@ -244,69 +25,239 @@ interface PresenceSet {
   presence: Ably.Types.PresenceMessage[],
 }
 
-function updateCurrentState(presenceSet: string[]): void {
+// AMQP
+let presenceQueueName: string;
+if (process.env.PRESENCE_QUEUE_NAME == undefined) {
+  presenceQueueName = 'presence-queue';
+} else {
+  presenceQueueName = process.env.PRESENCE_QUEUE_NAME;
+}
+let occupancyQueueName: string;
+if (process.env.OCCUPANCY_QUEUE_NAME == undefined) {
+  occupancyQueueName = 'occupancy-queue';
+} else {
+  occupancyQueueName = process.env.OCCUPANCY_QUEUE_NAME;
+}
+const queueEndpoint = "us-east-1-a-queue.ably.io:5671/shared";
+
+// Ably details
+const apiKey = process.env.ABLY_API_KEY;
+if (!apiKey) {
+  throw new Error('no Ably API key set');
+}
+const rest = new Ably.Rest.Promise({ key: apiKey });
+const realtime = new Ably.Realtime.Promise({ key: apiKey });
+let channelNamespace: RegExp;
+if (process.env.NAMESPACE_REGEX === undefined) {
+  channelNamespace = /^presence:.*/;
+} else {
+  channelNamespace = new RegExp(process.env.NAMESPACE_REGEX);
+}
+
+getInitialPresenceState();
+
+async function getInitialPresenceState() {
+  try {
+    // Make a request for all currently active channels
+    let response = await rest.request('get', '/channels', { by: 'id' });
+    let channelsToCheck = "";
+    let firstElementAdded = false;
+    for (let channelId of response.items) {
+      if (!channelId.match(channelNamespace)) {
+        continue;
+      }
+      if (!firstElementAdded) {
+        firstElementAdded = true;
+        channelsToCheck = channelId;
+      } else {
+        channelsToCheck += "," + channelId;
+      }
+    }
+    await fetchPresenceSets(channelsToCheck, true);
+
+    consumeFromAbly();
+  }
+  catch (err: any) {
+    console.log('An error occurred; err = ' + err.toString());
+  }
+}
+
+async function consumeFromAbly() {
+  const endpoint = queueEndpoint;
+  const url = 'amqps://' + apiKey + '@' + endpoint;
+
+  try {
+    // Connect to Ably queue
+    let conn = await Amqp.connect(url);
+    conn.on('error', (err) => { console.error('worker:', 'Connection error!', err); });
+    // Create a communication channel
+    let queueChannel = await conn.createChannel();
+    // Consume from queue
+    const appId = apiKey?.split('.')[0];
+    const presenceQueue = appId + ":" + presenceQueueName;
+    const occupancyQueue = appId + ":" + occupancyQueueName;
+
+    queueChannel.consume(presenceQueue, (item) => {
+      if (!item) {
+        console.warn('queueChannel.consume returned a null item');
+        return;
+      }
+      // Remove message from queue
+      queueChannel.ack(item);
+
+      const decodedEnvelope = JSON.parse(item.content.toString());
+
+      let currentChannel = decodedEnvelope.channel;
+
+      let messages = Ably.Realtime.PresenceMessage.fromEncodedArray(decodedEnvelope.presence);
+
+      messages.forEach((message) => {
+        presenceUpdate(currentChannel, message, false);
+      });
+    });
+
+    queueChannel.consume(occupancyQueue, async (item) => {
+      if (!item) {
+        console.warn('queueChannel.consume returned a null item');
+        return;
+      }
+      // Remove message from queue
+      queueChannel.ack(item);
+
+      const decodedEnvelope = JSON.parse(item.content.toString());
+      const timestamp = item.properties.timestamp;
+      let occupancyUpdate: OccupancyUpdate = Object.assign(<OccupancyUpdate>{}, decodedEnvelope);
+      for (let occupancy of occupancyUpdate.occupancy) {
+        if (!storage.has(occupancyUpdate.channel)) {
+          continue;
+        }
+        let channel = storage.get(occupancyUpdate.channel)!;
+        channel.expectedPresenceMembers = occupancy.metrics.presenceMembers;
+        console.log('occupancy: ' + JSON.stringify(decodedEnvelope) + ' timestamp=' + timestamp);
+        //console.log('occupancy update: ' + occupancyUpdate.channel + '=' + occupancy.metrics.presenceMembers);
+      }
+    });
+  } catch (err) {
+    console.error('worker:', 'Queue error!', err);
+  }
+};
+
+async function fetchPresenceSets(channels: string, updateMemberCount: boolean) {
+  let content = { "channels": channels }
+  // Make a batch request to all relevant channels for their presence sets
+  let presenceSet = await rest.request('GET', '/presence', content);
+  updateCurrentState(presenceSet!.items, updateMemberCount);
+}
+
+function updateCurrentState(presenceSet: string[], updateMemberCount: boolean): void {
   for (let channelPresenceSet of presenceSet) {
     let presenceSet = Object.assign(<PresenceSet>{}, channelPresenceSet);
     let channelName = presenceSet.channel;
-    /*
-    currentStateByChannel[channelName] = {};
-    */
 
     for (let presenceMessage of presenceSet.presence) {
-      let clientId = presenceMessage.clientId;
-      let connectionId = presenceMessage.connectionId;
-
-      presenceUpdate(channelName, presenceMessage);
-
-      /*
-      // Add the presence message to the object sorted by channel
-      createObjectField(currentStateByChannel, channelName, clientId, connectionId, presenceMessage);
-      // Add the presence message to the object sorted by clientId
-      createObjectField(currentStateByClientId, clientId, channelName, connectionId, presenceMessage);
-      // Add the presence message to the object sorted by connectionId
-      createObjectField(currentStateByConnectionId, connectionId, clientId, channelName, presenceMessage);
-      */
+      presenceUpdate(channelName, presenceMessage, updateMemberCount);
     }
   }
 }
 
-function presenceUpdate(channelId:string, update: Ably.Types.PresenceMessage) {
-  console.log('presence update for '+channelId+'=' + JSON.stringify(update));
-}
-
-/*
-function createObjectField(obj, param1: string, param2: string, param3: string, message: Ably.Types.PresenceMessage) {
-  if (obj[param1] === undefined) {
-    obj[param1] = {};
-  }
-  if (obj[param1][param2] === undefined) {
-    obj[param1][param2] = {};
-  }
-  obj[param1][param2][param3] = message;
-}
-
-function updatePresenceObject(obj, param1: string, param2: string, param3: string, message: Ably.Types.PresenceMessage) {
-  let action = message.action;
-
-  if (obj[param1] == undefined) {
-    obj[param1] = {};
-  }
-  if (obj[param1][param2] == undefined) {
-    obj[param1][param2] = {};
-  }
-
-  if (obj[param1][param2][param3] != undefined &&
-      message.timestamp <= obj[param1][param2][param3].timestamp) {
-  } else if (action === 'leave') {
-    delete obj[param1][param2][param3];
-    if (Object.keys(obj[param1][param2]).length === 0) {
-      delete obj[param1][param2];
+function checkPresenceMemberCount(): void {
+  storage.forEach((channel: Channel, channelId: string) => {
+    if (channel.expectedPresenceMembers != channel.members.size) {
+      console.log('member count error detected for channel ' + channelId + ', occupancy: ' + channel.expectedPresenceMembers +
+        ', us: ' + channel.members.size + '; syncing');
+      fetchPresenceSets(channelId, true);
     }
-    if (Object.keys(obj[param1]).length === 0) {
-      delete obj[param1];
-    }
-  } else if (action == 'enter') {
-    obj[param1][param2][param3] = message;
+  });
+}
+setInterval(checkPresenceMemberCount, 5000);
+
+class MemberKey {
+  clientId: string;
+  connectionId: string;
+  constructor(clientId: string, connectionId: string) {
+    this.clientId = clientId;
+    this.connectionId = connectionId;
+  }
+  toString(): string {
+    return this.clientId + '-' + this.connectionId;
   }
 }
-*/
+
+class Member {
+  latestTimestamp: number;
+  constructor(latestTimestamp: number) {
+    this.latestTimestamp = latestTimestamp;
+  }
+}
+
+class Channel {
+  expectedPresenceMembers: number;
+  members: Map<string, Member>;
+  constructor() {
+    this.expectedPresenceMembers = 0;
+    this.members = new Map<string, Member>();
+  }
+}
+
+let storage = new Map<string, Channel>();
+
+function displayStorage() {
+  console.log('storage:');
+  storage.forEach((channel: Channel, channelId: string) => {
+    console.log('\t' + channelId + ': (' + channel.expectedPresenceMembers + ')');
+    channel.members.forEach((member: Member, memberKey: string) => {
+      console.log('\t\t' + memberKey + ': ' + member.latestTimestamp);
+    })
+  });
+}
+
+function presenceUpdate(channelId: string, update: Ably.Types.PresenceMessage, updateMemberCount: boolean) {
+  // TODO: what if clientId contains '-'?
+  switch (update.action.toString()) {
+    case "1": // BUG: presence queue returns an integer as the action
+    case "present":
+    case "2": // BUG: presence queue returns an integer as the action
+    case "enter": {
+      if (!storage.has(channelId)) {
+        storage.set(channelId, new Channel());
+      }
+      let channel = storage.get(channelId)!;
+      let memberKey = new MemberKey(update.clientId, update.connectionId);
+      if (!channel.members.has(memberKey.toString())) {
+        channel.members.set(memberKey.toString(), new Member(update.timestamp));
+      } else {
+        let member = channel.members.get(memberKey.toString())!;
+        member.latestTimestamp = update.timestamp;
+      }
+      if (updateMemberCount) {
+        channel.expectedPresenceMembers = channel.members.size;
+      }
+      displayStorage();
+      break;
+    }
+    case "3": // BUG: presence queue returns an integer as the action
+    case "leave": {
+      if (!storage.has(channelId)) {
+        break;
+      }
+      let channel = storage.get(channelId)!;
+      let memberKey = new MemberKey(update.clientId, update.connectionId);
+      if (!channel.members.has(memberKey.toString())) {
+        break;
+      }
+      let member = channel.members.get(memberKey.toString())!;
+      // Ignore a leave event if its timestamp is older than ours
+      if (update.timestamp > member.latestTimestamp) {
+        channel.members.delete(memberKey.toString());
+      }
+      if (updateMemberCount) {
+        channel.expectedPresenceMembers = channel.members.size;
+      }
+      if (channel.members.size == 0) {
+        storage.delete(channelId);
+      }
+      displayStorage();
+      break;
+    }
+  }
+}
