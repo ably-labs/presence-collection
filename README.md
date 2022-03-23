@@ -41,10 +41,15 @@ This will pull the image from docker hub to your local device.
 You can now run the app with the following:
 
 `docker run --env ABLY_API_KEY="YOUR_API_KEY" --env QUEUE_NAME="presence-queue" --env NAMESPACE_REGEX="^presence:.*"  tomably/presence-collection:1.1.0`
-or 
-`docker run --env ABLY_API_KEY="YOUR_API_KEY" --env QUEUE_NAME="presence-queue" --env NAMESPACE_REGEX="^presence:.*" --env CONSUME_ON_START="true"  tomably/presence-collection:1.1.0`
 
-if you want to start it by default. If CONSUME_ON_START is not specified, you will need to send "start" command to channel named: "presencebatch:commands" in order to server to start processsing.
+The environment variables for this are:
+
+* **ABLY_API_KEY** - required - The Ably API key for your Ably App you will be consuming from
+* **QUEUE_NAME** - optional (default: `presence-queue`) - The name you gave to your queue which is collecting presence events
+* **NAMESPACE_REGEX** - optional (default: `^presence:.*`) - The channels, defined as a RegExp, you wish to consume from. Should match the expression used when creating your Ably Reactor Rule
+* **CONSUME_ON_START** - optional (default: `false`) - Whether you wish for this to consume from the queue and sending updates upon starting. If false, you will need to send a message to the channel `presencebatch:commands` with name `update` and data `start` to start this consuming from Ably
+
+if you want to start it by default. If CONSUME_ON_START is not specified, you will need to send the "start" command to the channel named: "presencebatch:commands" in order for the server to start processing.
 
 Replace the Ably API key, queue name (what you called the queue above) and namespace regex to match your needs. In addition, change the image name if you're using a differently named one.
 
