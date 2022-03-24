@@ -1,5 +1,6 @@
 import * as Amqp from 'amqplib';
 import * as Ably from 'ably';
+const Mmh3 = require('murmurhash3');
 
 // Interfaces
 interface Metrics {
@@ -38,7 +39,7 @@ if (process.env.OCCUPANCY_QUEUE_NAME == undefined) {
 } else {
   occupancyQueueName = process.env.OCCUPANCY_QUEUE_NAME;
 }
-const queueEndpoint = "us-east-1-a-queue.ably.io:5671/shared";
+const queueEndpoint = "eu-west-1-a-queue.ably.io:5671/shared";
 
 // Ably details
 const apiKey = process.env.ABLY_API_KEY;
@@ -125,16 +126,9 @@ async function consumeFromAbly() {
       queueChannel.ack(item);
 
       const decodedEnvelope = JSON.parse(item.content.toString());
-      const timestamp = item.properties.timestamp;
-      let occupancyUpdate: OccupancyUpdate = Object.assign(<OccupancyUpdate>{}, decodedEnvelope);
-      for (let occupancy of occupancyUpdate.occupancy) {
-        if (!storage.has(occupancyUpdate.channel)) {
-          continue;
-        }
-        let channel = storage.get(occupancyUpdate.channel)!;
-        channel.expectedPresenceMembers = occupancy.metrics.presenceMembers;
-        console.log('occupancy: ' + JSON.stringify(decodedEnvelope) + ' timestamp=' + timestamp);
-        //console.log('occupancy update: ' + occupancyUpdate.channel + '=' + occupancy.metrics.presenceMembers);
+      let update: OccupancyUpdate = Object.assign(<OccupancyUpdate>{}, decodedEnvelope);
+      for (let occupancy of update.occupancy) {
+        occupancyUpdate(update.channel, occupancy);
       }
     });
   } catch (err) {
@@ -160,101 +154,134 @@ function updateCurrentState(presenceSet: string[], updateMemberCount: boolean): 
   }
 }
 
-function checkPresenceMemberCount(): void {
-  storage.forEach((channel: Channel, channelId: string) => {
-    if (channel.expectedPresenceMembers != channel.members.size) {
-      console.log('member count error detected for channel ' + channelId + ', occupancy: ' + channel.expectedPresenceMembers +
-        ', us: ' + channel.members.size + '; syncing');
-      fetchPresenceSets(channelId, true);
-    }
-  });
+function checkPresenceMemberCount(channelId: string): void {
+  if (!storage.has(channelId)) {
+    return;
+  }
+  const channel = storage.get(channelId)!;
+  channel.memberCountCheckTimeout = null;
+  if (channel.expectedPresenceMembers != channel.members.size) {
+    console.log('member count error detected for channel ' + channelId + ', occupancy: ' + channel.expectedPresenceMembers +
+      ', us: ' + channel.members.size + '; syncing');
+    fetchPresenceSets(channelId, true);
+  }
 }
-setInterval(checkPresenceMemberCount, 5000);
 
 class MemberKey {
-  clientId: string;
-  connectionId: string;
+  hash: number;
   constructor(clientId: string, connectionId: string) {
-    this.clientId = clientId;
-    this.connectionId = connectionId;
-  }
-  toString(): string {
-    return this.clientId + '-' + this.connectionId;
+    this.hash = Mmh3.murmur32Sync(clientId + connectionId);
   }
 }
 
 class Member {
   latestTimestamp: number;
-  constructor(latestTimestamp: number) {
-    this.latestTimestamp = latestTimestamp;
+  clientId: string;
+  connectionId: string;
+  constructor(clientId: string, connectionId: string) {
+    this.clientId = clientId;
+    this.connectionId = connectionId;
+    this.latestTimestamp = 0;
   }
 }
 
 class Channel {
   expectedPresenceMembers: number;
-  members: Map<string, Member>;
+  memberCountCheckTimeout: NodeJS.Timeout | null;
+  members: Map<number, Member>;
   constructor() {
     this.expectedPresenceMembers = 0;
-    this.members = new Map<string, Member>();
+    this.memberCountCheckTimeout = null;
+    this.members = new Map<number, Member>();
   }
 }
 
 let storage = new Map<string, Channel>();
 
+function emplace<K, V>(map: Map<K, V>, key: K, defaultValue: () => V): V {
+  if (!map.has(key)) {
+    let value = defaultValue();
+    map.set(key, value);
+    return value;
+  }
+  return map.get(key)!;
+}
+
 function displayStorage() {
-  console.log('storage:');
+  console.log('new storage state:');
   storage.forEach((channel: Channel, channelId: string) => {
     console.log('\t' + channelId + ': (' + channel.expectedPresenceMembers + ')');
-    channel.members.forEach((member: Member, memberKey: string) => {
-      console.log('\t\t' + memberKey + ': ' + member.latestTimestamp);
+    channel.members.forEach((member: Member, _) => {
+      console.log('\t\t' + member.clientId + '-' + member.connectionId + ': ' + member.latestTimestamp);
     })
   });
 }
 
+function setupMemberCountCheckTimeout(channel: Channel, channelId: string) {
+  if (channel.memberCountCheckTimeout) {
+    clearTimeout(channel.memberCountCheckTimeout);
+  }
+  channel.memberCountCheckTimeout = setTimeout(() => checkPresenceMemberCount(channelId), 5000);
+}
+
+function occupancyUpdate(channelId: string, occupancy: Occupancy) {
+  if (!storage.has(channelId)) {
+    return;
+  }
+  let channel = storage.get(channelId)!;
+  channel.expectedPresenceMembers = occupancy.metrics.presenceMembers;
+  setupMemberCountCheckTimeout(channel, channelId);
+  console.log('> occupancy update: ' + channelId + '=' + occupancy.metrics.presenceMembers);
+  displayStorage();
+}
+
 function presenceUpdate(channelId: string, update: Ably.Types.PresenceMessage, updateMemberCount: boolean) {
-  // TODO: what if clientId contains '-'?
-  switch (update.action.toString()) {
-    case "1": // BUG: presence queue returns an integer as the action
+  console.log('> presence update: ' + channelId);
+  // Ignore updates with a timestamp older than ours
+  const memberKey = new MemberKey(update.clientId, update.connectionId);
+  if (storage.has(channelId)) {
+    const channel = storage.get(channelId)!;
+    if (channel.members.has(memberKey.hash)) {
+      const member = channel.members.get(memberKey.hash)!;
+      if (update.timestamp < member.latestTimestamp) {
+        return;
+      }
+    }
+  }
+  switch (update.action.toString()) { // BUG: presence queue returns an integer as the action
+    case "1":
     case "present":
-    case "2": // BUG: presence queue returns an integer as the action
-    case "enter": {
-      if (!storage.has(channelId)) {
-        storage.set(channelId, new Channel());
-      }
-      let channel = storage.get(channelId)!;
-      let memberKey = new MemberKey(update.clientId, update.connectionId);
-      if (!channel.members.has(memberKey.toString())) {
-        channel.members.set(memberKey.toString(), new Member(update.timestamp));
-      } else {
-        let member = channel.members.get(memberKey.toString())!;
-        member.latestTimestamp = update.timestamp;
-      }
+    case "2":
+    case "enter":
+    case "4":
+    case "update": {
+      const channel = emplace(storage, channelId, () => new Channel());
+      const member = emplace(channel.members, memberKey.hash, () => new Member(update.clientId, update.connectionId));
+      member.latestTimestamp = update.timestamp;
+      setupMemberCountCheckTimeout(channel, channelId);
       if (updateMemberCount) {
         channel.expectedPresenceMembers = channel.members.size;
       }
       displayStorage();
       break;
     }
-    case "3": // BUG: presence queue returns an integer as the action
+    case "3":
     case "leave": {
       if (!storage.has(channelId)) {
         break;
       }
-      let channel = storage.get(channelId)!;
-      let memberKey = new MemberKey(update.clientId, update.connectionId);
-      if (!channel.members.has(memberKey.toString())) {
+      const channel = storage.get(channelId)!;
+      if (!channel.members.has(memberKey.hash)) {
         break;
       }
-      let member = channel.members.get(memberKey.toString())!;
-      // Ignore a leave event if its timestamp is older than ours
-      if (update.timestamp > member.latestTimestamp) {
-        channel.members.delete(memberKey.toString());
-      }
+      channel.members.delete(memberKey.hash);
       if (updateMemberCount) {
         channel.expectedPresenceMembers = channel.members.size;
       }
       if (channel.members.size == 0) {
         storage.delete(channelId);
+      } else {
+        setupMemberCountCheckTimeout(channel, channelId);
       }
       displayStorage();
       break;

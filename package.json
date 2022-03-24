@@ -9,7 +9,9 @@
   },
   "dependencies": {
     "@types/amqplib": "^0.8.2",
-    "ably": "^1.2.3"
+    "amqplib": "^0.6.0",
+    "ably": "^1.2.3",
+    "murmurhash3": "^0.5.0"
   },
   "devDependencies": {
     "@types/node": "^17.0.22"
