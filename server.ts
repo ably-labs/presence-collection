@@ -39,15 +39,21 @@ if (process.env.OCCUPANCY_QUEUE_NAME == undefined) {
 } else {
   occupancyQueueName = process.env.OCCUPANCY_QUEUE_NAME;
 }
-const queueEndpoint = "eu-west-1-a-queue.ably.io:5671/shared";
+let queueEndpoint: string;
+if (process.env.QUEUE_ENDPOINT == undefined) {
+  queueEndpoint = 'eu-west-1-a-queue.ably.io:5671/shared';
+} else {
+  queueEndpoint = process.env.QUEUE_ENDPOINT;
+}
 
 // Ably details
 const apiKey = process.env.ABLY_API_KEY;
 if (!apiKey) {
   throw new Error('no Ably API key set');
 }
-const rest = new Ably.Rest.Promise({ key: apiKey });
-const realtime = new Ably.Realtime.Promise({ key: apiKey });
+const environment = process.env.ABLY_ENVIRONMENT;
+const rest = new Ably.Rest.Promise({ key: apiKey, environment: environment });
+const realtime = new Ably.Realtime.Promise({ key: apiKey, environment: environment });
 let channelNamespace: RegExp;
 if (process.env.NAMESPACE_REGEX === undefined) {
   channelNamespace = /^presence:.*/;
@@ -55,15 +61,19 @@ if (process.env.NAMESPACE_REGEX === undefined) {
   channelNamespace = new RegExp(process.env.NAMESPACE_REGEX);
 }
 
-getInitialPresenceState();
+if (process.env.FETCH_INITIAL_PRESENCE_STATE != undefined && process.env.FETCH_INITIAL_PRESENCE_STATE == "true") {
+  getInitialPresenceState();
+} else {
+  consumeFromAbly();
+}
 
 async function getInitialPresenceState() {
   try {
     // Make a request for all currently active channels
-    let response = await rest.request('get', '/channels', { by: 'id' });
+    const response = await rest.request('get', '/channels', { by: 'id' });
     let channelsToCheck = "";
     let firstElementAdded = false;
-    for (let channelId of response.items) {
+    for (const channelId of response.items) {
       if (!channelId.match(channelNamespace)) {
         continue;
       }
@@ -89,10 +99,10 @@ async function consumeFromAbly() {
 
   try {
     // Connect to Ably queue
-    let conn = await Amqp.connect(url);
+    const conn = await Amqp.connect(url);
     conn.on('error', (err) => { console.error('worker:', 'Connection error!', err); });
     // Create a communication channel
-    let queueChannel = await conn.createChannel();
+    const queueChannel = await conn.createChannel();
     // Consume from queue
     const appId = apiKey?.split('.')[0];
     const presenceQueue = appId + ":" + presenceQueueName;
@@ -108,9 +118,9 @@ async function consumeFromAbly() {
 
       const decodedEnvelope = JSON.parse(item.content.toString());
 
-      let currentChannel = decodedEnvelope.channel;
+      const currentChannel = decodedEnvelope.channel;
 
-      let messages = Ably.Realtime.PresenceMessage.fromEncodedArray(decodedEnvelope.presence);
+      const messages = Ably.Realtime.PresenceMessage.fromEncodedArray(decodedEnvelope.presence);
 
       messages.forEach((message) => {
         presenceUpdate(currentChannel, message, false);
@@ -126,8 +136,8 @@ async function consumeFromAbly() {
       queueChannel.ack(item);
 
       const decodedEnvelope = JSON.parse(item.content.toString());
-      let update: OccupancyUpdate = Object.assign(<OccupancyUpdate>{}, decodedEnvelope);
-      for (let occupancy of update.occupancy) {
+      const update: OccupancyUpdate = Object.assign(<OccupancyUpdate>{}, decodedEnvelope);
+      for (const occupancy of update.occupancy) {
         occupancyUpdate(update.channel, occupancy);
       }
     });
@@ -137,18 +147,18 @@ async function consumeFromAbly() {
 };
 
 async function fetchPresenceSets(channels: string, updateMemberCount: boolean) {
-  let content = { "channels": channels }
+  const content = { "channels": channels }
   // Make a batch request to all relevant channels for their presence sets
-  let presenceSet = await rest.request('GET', '/presence', content);
+  const presenceSet = await rest.request('GET', '/presence', content);
   updateCurrentState(presenceSet!.items, updateMemberCount);
 }
 
 function updateCurrentState(presenceSet: string[], updateMemberCount: boolean): void {
-  for (let channelPresenceSet of presenceSet) {
-    let presenceSet = Object.assign(<PresenceSet>{}, channelPresenceSet);
-    let channelName = presenceSet.channel;
+  for (const channelPresenceSet of presenceSet) {
+    const presenceSet = Object.assign(<PresenceSet>{}, channelPresenceSet);
+    const channelName = presenceSet.channel;
 
-    for (let presenceMessage of presenceSet.presence) {
+    for (const presenceMessage of presenceSet.presence) {
       presenceUpdate(channelName, presenceMessage, updateMemberCount);
     }
   }
@@ -196,11 +206,11 @@ class Channel {
   }
 }
 
-let storage = new Map<string, Channel>();
+const storage = new Map<string, Channel>();
 
 function emplace<K, V>(map: Map<K, V>, key: K, defaultValue: () => V): V {
   if (!map.has(key)) {
-    let value = defaultValue();
+    const value = defaultValue();
     map.set(key, value);
     return value;
   }
@@ -228,7 +238,7 @@ function occupancyUpdate(channelId: string, occupancy: Occupancy) {
   if (!storage.has(channelId)) {
     return;
   }
-  let channel = storage.get(channelId)!;
+  const channel = storage.get(channelId)!;
   channel.expectedPresenceMembers = occupancy.metrics.presenceMembers;
   setupMemberCountCheckTimeout(channel, channelId);
   console.log('> occupancy update: ' + channelId + '=' + occupancy.metrics.presenceMembers);
