@@ -113,18 +113,17 @@ async function consumeFromAbly() {
         console.warn('queueChannel.consume returned a null item');
         return;
       }
-      // Remove message from queue
-      queueChannel.ack(item);
 
       const decodedEnvelope = JSON.parse(item.content.toString());
-
       const currentChannel = decodedEnvelope.channel;
-
       const messages = Ably.Realtime.PresenceMessage.fromEncodedArray(decodedEnvelope.presence);
 
       messages.forEach((message) => {
         presenceUpdate(currentChannel, message, false);
       });
+
+      // Remove message from queue
+      queueChannel.ack(item);
     });
 
     queueChannel.consume(occupancyQueue, async (item) => {
@@ -132,14 +131,15 @@ async function consumeFromAbly() {
         console.warn('queueChannel.consume returned a null item');
         return;
       }
-      // Remove message from queue
-      queueChannel.ack(item);
 
       const decodedEnvelope = JSON.parse(item.content.toString());
       const update: OccupancyUpdate = Object.assign(<OccupancyUpdate>{}, decodedEnvelope);
       for (const occupancy of update.occupancy) {
         occupancyUpdate(update.channel, occupancy);
       }
+
+      // Remove message from queue
+      queueChannel.ack(item); // TODO: comment about why here
     });
   } catch (err) {
     console.error('worker:', 'Queue error!', err);
