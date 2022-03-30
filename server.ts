@@ -158,18 +158,12 @@ async function consumeFromAbly() {
 // Fetch presence set from a list of channels.
 async function fetchPresenceSets(channels: string, updateMemberCount: boolean) {
   const content = { "channels": channels }
-  const presenceSet = await rest.request('GET', '/presence', content);
-  updateCurrentState(presenceSet!.items, updateMemberCount);
-}
-
-// Processes a presence set update into presence messages.
-function updateCurrentState(presenceSet: string[], updateMemberCount: boolean): void {
-  for (const channelPresenceSet of presenceSet) {
-    const presenceSet = Object.assign(<PresenceSet>{}, channelPresenceSet);
-    const channelName = presenceSet.channel;
-
-    for (const presenceMessage of presenceSet.presence) {
-      presenceUpdate(channelName, presenceMessage, updateMemberCount);
+  const result = await rest.request('GET', '/presence', content);
+  for (const item of result.items) {
+    const presenceSet: PresenceSet = Object.assign(<PresenceSet>{}, item);
+    const messages = Ably.Realtime.PresenceMessage.fromEncodedArray(presenceSet.presence);
+    for (const message of messages) {
+      presenceUpdate(presenceSet.channel, message, updateMemberCount);
     }
   }
 }
@@ -285,13 +279,9 @@ function presenceUpdate(channelId: string, update: Ably.Types.PresenceMessage, u
       }
     }
   }
-  switch (update.action.toString()) {
-    // The presence queue returns an integer as the action, so we have to accept both.
-    case "1":
+  switch (update.action) {
     case "present":
-    case "2":
     case "enter":
-    case "4":
     case "update": {
       const channel = emplace(storage, channelId, () => new Channel());
       const member = emplace(channel.members, memberKey.hash, () => new Member(update.clientId, update.connectionId));
@@ -303,7 +293,6 @@ function presenceUpdate(channelId: string, update: Ably.Types.PresenceMessage, u
       displayStorage();
       break;
     }
-    case "3":
     case "leave": {
       // Do some cleanup if needed (remove empty channels).
       if (!storage.has(channelId)) {
