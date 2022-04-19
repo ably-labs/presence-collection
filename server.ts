@@ -2,7 +2,7 @@
  This code sample shows how a global presence set can be set up and updated.
  It uses Ably queue rules to fetch presence and occupancy updates on multiple channels and aggregates them.
  Occupancy updates are used to verify that the presence member count is as expected.
- If it is not the case then a presence set REST request is done to fix any discrepancy.
+ If the member count is not correct then a presence set REST request is done to resynchronise the presence set.
  Timestamps are checked to prevent an earlier event being processed after a newer one.
  Environment variables:
  ABLY_API_KEY: Ably API key
