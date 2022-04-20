@@ -2,11 +2,12 @@ FROM node:12
 
 WORKDIR /usr/src/app
 
-COPY package*.json ./
+COPY *.json ./
 
-RUN npm install
+RUN npm install\
+    && npm install -g ts-node typescript '@types/node'
 
 COPY . .
 
 EXPOSE 8080
-CMD [ "node", "server.js" ]
+CMD [ "ts-node", "server.ts" ]

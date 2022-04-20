@@ -220,6 +220,8 @@ class Channel {
 }
 
 // Global storage map.
+// This sample code uses a global storage map for simplicity. In a production context a 
+// database could be used instead, depending on the use case.
 const storage = new Map<string, Channel>();
 
 // 'emplace' operation on a map.
